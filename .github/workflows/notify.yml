@@ -16,7 +16,6 @@ jobs:
         run: |
           gh workflow run populate-catalog.yml \
             --repo matthewwiese/LIS-autocontent \
-            --ref extend-collections \
             --field source_repository="${GITHUB_REPOSITORY}" \
             --field source_sha="${GITHUB_SHA}" \
             --field source_run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
