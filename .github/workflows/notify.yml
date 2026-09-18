@@ -16,7 +16,4 @@ jobs:
           GH_TOKEN: ${{ secrets.LIS_AUTOCONTENT_DISPATCH_TOKEN }}
         run: |
           gh workflow run populate-catalog.yml \
-            --repo matthewwiese/LIS-autocontent \
-            --field source_repository="${GITHUB_REPOSITORY}" \
-            --field source_sha="${GITHUB_SHA}" \
-            --field source_run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            --repo matthewwiese/LIS-autocontent
