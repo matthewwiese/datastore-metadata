@@ -3,6 +3,7 @@ name: Notify LIS-autocontent
 on:  # yamllint disable-line rule:truthy
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   dispatch:
