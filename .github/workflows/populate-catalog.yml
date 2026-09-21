@@ -1,0 +1,89 @@
+---
+name: Populate catalog
+# Builds catalog.json from this repository's contents and publishes it as a release
+# here, using lis-autocontent from matthewwiese/LIS-autocontent.
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      autocontent_ref:
+        description: Branch, tag or SHA of LIS-autocontent to build with
+        default: main
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: populate-catalog
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write  # only this job creates a release
+    steps:
+      - name: Check out datastore-metadata
+        uses: actions/checkout@v4
+        with:
+          path: datastore-metadata
+
+      - name: Check out LIS-autocontent
+        uses: actions/checkout@v4
+        with:
+          repository: matthewwiese/LIS-autocontent
+          ref: ${{ inputs.autocontent_ref || 'main' }}
+          path: lis-autocontent
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install lis-autocontent
+        run: pip install ./lis-autocontent
+
+      # Offline, so a given pair of commits always yields the same catalog. --verify
+      # would HEAD-check files predicted for collections without a CHECKSUM, but a probe
+      # that fails for any reason reads as "file absent" and drops the file.
+      - name: Build catalog.json
+        run: |
+          lis-autocontent populate-catalog \
+            --from_github datastore-metadata \
+            --catalog_out catalog/catalog.json \
+            --log_file populate-catalog.log
+
+      # Tagged by build time and commit: seconds are included because gh release create
+      # refuses an existing tag, so a re-run on the same commit needs its own.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          commit=${GITHUB_SHA:0:7}
+          autocontent=$(git -C lis-autocontent rev-parse HEAD)
+          repo_url=https://github.com/matthewwiese/datastore-metadata
+          cat > notes.md <<EOF
+          Catalog of the whole LIS datastore, built offline by \`populate-catalog\`.
+
+          | | |
+          | --- | --- |
+          | datastore-metadata | [\`$commit\`]($repo_url/commit/$GITHUB_SHA) |
+          | lis-autocontent | [\`${autocontent:0:7}\`](https://github.com/matthewwiese/LIS-autocontent/commit/$autocontent) |
+          | built by | [run $GITHUB_RUN_ID]($repo_url/actions/runs/$GITHUB_RUN_ID) |
+          | catalog.json | $(stat -c%s catalog/catalog.json) bytes, sha256 \`$(sha256sum catalog/catalog.json | cut -d' ' -f1)\` |
+
+          The newest catalog is always at $repo_url/releases/latest/download/catalog.json
+          EOF
+          # --repo is required: the working directory is not itself a checkout.
+          gh release create "catalog-$(date -u +%Y%m%d-%H%M%S)-$commit" \
+            catalog/catalog.json \
+            --repo matthewwiese/datastore-metadata \
+            --title "Catalog $(date -u +%Y-%m-%d) (datastore-metadata $commit)" \
+            --notes-file notes.md \
+            --latest
