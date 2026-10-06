@@ -52,12 +52,17 @@ jobs:
       # Offline, so a given pair of commits always yields the same catalog. --verify
       # would HEAD-check files predicted for collections without a CHECKSUM, but a probe
       # that fails for any reason reads as "file absent" and drops the file.
+      # all-genera's deployed JBrowse config is a copy committed to LIS-autocontent, as
+      # its robots.txt forbids fetching it; without it all-genera reads "unavailable".
       - name: Build catalog.json
         run: |
           lis-autocontent populate-catalog \
             --from_github datastore-metadata \
             --catalog_out catalog/catalog.json \
+            --jbrowse_config lis-autocontent/all-genera.json \
+            --jbrowse_report jbrowse-report.md \
             --log_file populate-catalog.log
+          cat jbrowse-report.md >> "$GITHUB_STEP_SUMMARY"
 
       # Tagged by build time and commit: seconds are included because gh release create
       # refuses an existing tag, so a re-run on the same commit needs its own.
