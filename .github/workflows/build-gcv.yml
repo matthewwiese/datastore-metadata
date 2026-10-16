@@ -189,8 +189,6 @@ jobs:
       # so gcvctl fetches and checks it on `up`.
       - name: Point the instances at their databases
         id: point
-        env:
-          TEMPLATE: ${{ needs.plan.outputs.template }}
         run: |
           cd assets
           tar -xzf gcv.tar.gz
@@ -204,9 +202,8 @@ jobs:
               echo "RDB_SHA256=$(sha256sum "$rdb" | cut -d' ' -f1)"
             } >> "gcv/instances/$instance.env"
           done
-          echo "$TEMPLATE" > gcv/TEMPLATE
-          tar -czf gcv-instances.tar.gz -C gcv instances data README.md TEMPLATE \
-            DATASTORE_METADATA_REPOSITORY DATASTORE_METADATA_COMMIT LIS_AUTOCONTENT_COMMIT
+          # Only what gcvctl reads, so unpacking into a checkout replaces nothing of its own.
+          tar -czf gcv-instances.tar.gz -C gcv instances data
           sha256sum gcv-instances.tar.gz *.rdb > SHA256SUMS
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
