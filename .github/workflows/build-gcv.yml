@@ -1,10 +1,9 @@
 ---
 name: Build GCV databases
-# Plans LIS's GCV instances with populate-gcv from datastore-metadata (upstream's main by
-# default, not this fork's copy), builds each instance's Redis database
-# with gcv-docker-compose's gcvctl in a job of its own, and publishes the databases as a
-# release here, with instance files that point at them. The instances are whatever
-# populate-gcv writes: one instances/<name>.env each.
+# Plans LIS's GCV instances with populate-gcv from this repository, builds each
+# instance's Redis database with gcv-docker-compose's gcvctl in a job of its own, and
+# publishes the databases as a release here, with instance files that point at them.
+# The instances are whatever populate-gcv writes: one instances/<name>.env each.
 #
 # Deploying a release: in a gcv-docker-compose checkout of the same template, unpack
 # gcv-instances.tar.gz, then `./gcvctl proxy` once and `./gcvctl up <name>`; each
@@ -13,10 +12,6 @@ name: Build GCV databases
 on:  # yamllint disable-line rule:truthy
   workflow_dispatch:
     inputs:
-      metadata_repository:
-        description: datastore-metadata repository to plan from (its main branch)
-        default: legumeinfo/datastore-metadata
-        required: false
       autocontent_ref:
         description: Branch, tag or SHA of LIS-autocontent to build with
         default: extend-collections
@@ -51,8 +46,6 @@ jobs:
       - name: Check out datastore-metadata
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.metadata_repository || 'legumeinfo/datastore-metadata' }}
-          ref: main
           path: datastore-metadata
 
       - name: Check out LIS-autocontent
@@ -106,8 +99,6 @@ jobs:
       - name: Pack the instances
         run: |
           git -C datastore-metadata rev-parse HEAD > gcv/DATASTORE_METADATA_COMMIT
-          echo "${{ inputs.metadata_repository || 'legumeinfo/datastore-metadata' }}" \
-            > gcv/DATASTORE_METADATA_REPOSITORY
           git -C lis-autocontent rev-parse HEAD > gcv/LIS_AUTOCONTENT_COMMIT
           tar -czf gcv.tar.gz gcv
 
@@ -216,7 +207,6 @@ jobs:
         run: |
           cd assets
           metadata=$(cat gcv/DATASTORE_METADATA_COMMIT)
-          metadata_url="https://github.com/$(cat gcv/DATASTORE_METADATA_REPOSITORY)"
           autocontent=$(cat gcv/LIS_AUTOCONTENT_COMMIT)
           repo_url="https://github.com/${GITHUB_REPOSITORY}"
           {
@@ -226,7 +216,7 @@ jobs:
             echo
             echo "| | |"
             echo "| --- | --- |"
-            echo "| datastore-metadata | [\`${metadata:0:7}\`]($metadata_url/commit/$metadata) |"
+            echo "| datastore-metadata | [\`${metadata:0:7}\`]($repo_url/commit/$metadata) |"
             echo "| lis-autocontent | [\`${autocontent:0:7}\`](https://github.com/matthewwiese/LIS-autocontent/commit/$autocontent) |"
             echo "| gcv-docker-compose | \`$TEMPLATE\` |"
             echo "| built by | [run $GITHUB_RUN_ID]($repo_url/actions/runs/$GITHUB_RUN_ID) |"
