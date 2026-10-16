@@ -1,0 +1,247 @@
+---
+name: Build GCV databases
+# Plans LIS's GCV instances with populate-gcv from datastore-metadata (upstream's main by
+# default, not this fork's copy), builds each instance's Redis database
+# with gcv-docker-compose's gcvctl in a job of its own, and publishes the databases as a
+# release here, with instance files that point at them. The instances are whatever
+# populate-gcv writes: one instances/<name>.env each.
+#
+# Deploying a release: in a gcv-docker-compose checkout of the same template, unpack
+# gcv-instances.tar.gz, then `./gcvctl proxy` once and `./gcvctl up <name>`; each
+# instance downloads its database from RDB_URL and checks it against RDB_SHA256.
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+    inputs:
+      metadata_repository:
+        description: datastore-metadata repository to plan from (its main branch)
+        default: legumeinfo/datastore-metadata
+        required: false
+      autocontent_ref:
+        description: Branch, tag or SHA of LIS-autocontent to build with
+        default: extend-collections
+        required: false
+      template_ref:
+        description: gcv-docker-compose ref to build with; gcv.yml's template if empty
+        default: ''
+        required: false
+      instances:
+        description: Instances to build, space-separated; all of gcv.yml's if empty
+        default: ''
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-gcv
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      instances: ${{ steps.list.outputs.instances }}
+      template: ${{ steps.template.outputs.ref }}
+    steps:
+      - name: Check out datastore-metadata
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.metadata_repository || 'legumeinfo/datastore-metadata' }}
+          ref: main
+          path: datastore-metadata
+
+      - name: Check out LIS-autocontent
+        uses: actions/checkout@v4
+        with:
+          repository: matthewwiese/LIS-autocontent
+          ref: ${{ inputs.autocontent_ref || 'extend-collections' }}
+          path: lis-autocontent
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install lis-autocontent
+        run: pip install ./lis-autocontent
+
+      # Offline: fails, listing every problem, if any member can't be loaded from
+      # published files.
+      - name: Plan the instances
+        env:
+          INSTANCES: ${{ inputs.instances }}
+        run: |
+          args=()
+          for instance in $INSTANCES; do args+=(--instance "$instance"); done
+          lis-autocontent populate-gcv \
+            --from_github datastore-metadata \
+            --out_dir gcv \
+            --log_file populate-gcv.log \
+            "${args[@]}"
+          cat gcv/README.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Choose the template
+        id: template
+        env:
+          TEMPLATE_REF: ${{ inputs.template_ref }}
+        run: |
+          ref=${TEMPLATE_REF:-$(python -c '
+          import yaml
+          print(yaml.safe_load(open("lis-autocontent/src/lis_autocontent/gcv.yml"))["template"])')}
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      # An instance is an instances/<name>.env file.
+      - name: List the instances
+        id: list
+        run: |
+          instances=$(for f in gcv/instances/*.env; do basename "$f" .env; done |
+            jq -Rnc '[inputs]')
+          echo "instances=$instances" >> "$GITHUB_OUTPUT"
+
+      # A tarball keeps execute bits, which artifacts drop.
+      - name: Pack the instances
+        run: |
+          git -C datastore-metadata rev-parse HEAD > gcv/DATASTORE_METADATA_COMMIT
+          echo "${{ inputs.metadata_repository || 'legumeinfo/datastore-metadata' }}" \
+            > gcv/DATASTORE_METADATA_REPOSITORY
+          git -C lis-autocontent rev-parse HEAD > gcv/LIS_AUTOCONTENT_COMMIT
+          tar -czf gcv.tar.gz gcv
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gcv-tree
+          path: gcv.tar.gz
+
+  load:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        instance: ${{ fromJSON(needs.plan.outputs.instances) }}
+    name: load ${{ matrix.instance }}
+    steps:
+      - name: Check out gcv-docker-compose
+        uses: actions/checkout@v4
+        with:
+          repository: legumeinfo/gcv-docker-compose
+          ref: ${{ needs.plan.outputs.template }}
+          path: template
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gcv-tree
+
+      - name: Add the instance to the template
+        run: |
+          tar -xzf gcv.tar.gz
+          cp -r gcv/instances gcv/data template/
+          # The shared proxy owns this network in a deployment.
+          docker network create gcv
+
+      # redis_loader runs the instance's load script, Redis being empty, and saves the
+      # database after each annotation; any failed load fails the job.
+      - name: Load Redis
+        working-directory: template
+        run: ./gcvctl load "${{ matrix.instance }}"
+
+      - name: Check the database
+        working-directory: template
+        run: |
+          instance="${{ matrix.instance }}"
+          keys=$(./gcvctl compose "$instance" exec -T redis redis-cli dbsize)
+          indexes=$(./gcvctl compose "$instance" exec -T redis redis-cli FT._LIST | paste -sd' ')
+          echo "$instance: $keys keys; indexes: $indexes" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$keys" -gt 0 ]
+          ./gcvctl down "$instance"
+
+      # Redis writes dump.rdb as its own user.
+      - name: Collect the database
+        run: |
+          sudo install -m 644 "template/data/${{ matrix.instance }}/redis/dump.rdb" \
+            "${{ matrix.instance }}.rdb"
+          ls -l "${{ matrix.instance }}.rdb"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rdb-${{ matrix.instance }}
+          path: ${{ matrix.instance }}.rdb
+          compression-level: 0  # RDB is already compressed
+
+  release:
+    needs: [plan, load]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write  # only this job creates a release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      # Each instance's .env gains its database's URL in this release and its digest,
+      # so gcvctl fetches and checks it on `up`.
+      - name: Point the instances at their databases
+        id: point
+        env:
+          TEMPLATE: ${{ needs.plan.outputs.template }}
+        run: |
+          cd assets
+          tar -xzf gcv.tar.gz
+          metadata=$(cat gcv/DATASTORE_METADATA_COMMIT)
+          tag="gcv-$(date -u +%Y%m%d-%H%M%S)-${metadata:0:7}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag"
+          for rdb in *.rdb; do
+            instance=${rdb%.rdb}
+            {
+              echo "RDB_URL=$base/$rdb"
+              echo "RDB_SHA256=$(sha256sum "$rdb" | cut -d' ' -f1)"
+            } >> "gcv/instances/$instance.env"
+          done
+          echo "$TEMPLATE" > gcv/TEMPLATE
+          tar -czf gcv-instances.tar.gz -C gcv instances data README.md TEMPLATE \
+            DATASTORE_METADATA_REPOSITORY DATASTORE_METADATA_COMMIT LIS_AUTOCONTENT_COMMIT
+          sha256sum gcv-instances.tar.gz *.rdb > SHA256SUMS
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # Never --latest: releases/latest belongs to the catalog.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.point.outputs.tag }}
+          TEMPLATE: ${{ needs.plan.outputs.template }}
+        run: |
+          cd assets
+          metadata=$(cat gcv/DATASTORE_METADATA_COMMIT)
+          metadata_url="https://github.com/$(cat gcv/DATASTORE_METADATA_REPOSITORY)"
+          autocontent=$(cat gcv/LIS_AUTOCONTENT_COMMIT)
+          repo_url="https://github.com/${GITHUB_REPOSITORY}"
+          {
+            echo "Redis databases for LIS's GCV instances, built by gcvctl from populate-gcv's"
+            echo "load scripts. Unpack gcv-instances.tar.gz in a gcv-docker-compose \`$TEMPLATE\`"
+            echo "checkout, then \`./gcvctl proxy\` and \`./gcvctl up <instance>\`."
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| datastore-metadata | [\`${metadata:0:7}\`]($metadata_url/commit/$metadata) |"
+            echo "| lis-autocontent | [\`${autocontent:0:7}\`](https://github.com/matthewwiese/LIS-autocontent/commit/$autocontent) |"
+            echo "| gcv-docker-compose | \`$TEMPLATE\` |"
+            echo "| built by | [run $GITHUB_RUN_ID]($repo_url/actions/runs/$GITHUB_RUN_ID) |"
+            echo
+            echo "| Instance | Database |"
+            echo "| --- | --- |"
+            for rdb in *.rdb; do
+              echo "| \`${rdb%.rdb}\` | $(stat -c%s "$rdb") bytes |"
+            done
+          } > notes.md
+          gh release create "$TAG" gcv-instances.tar.gz *.rdb SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "GCV databases $(date -u +%Y-%m-%d) (datastore-metadata ${metadata:0:7})" \
+            --notes-file notes.md \
+            --latest=false
